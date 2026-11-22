@@ -6,6 +6,10 @@ your indexers through Prowlarr, picks releases that fit a plain-English quality
 policy, downloads them with qBittorrent, and files them into your Jellyfin
 library.
 
+This fork also runs a [private audio request service for Cadence](audio/README.md).
+Listeners request music in Cadence. Quarry finds and imports the release, and Cadence
+indexes the tracks for playback. The audio worker has its own database and download category.
+
 ![Quarry with a plan waiting for approval](docs/screenshot.png)
 
 ## How it works

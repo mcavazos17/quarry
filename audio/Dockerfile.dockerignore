@@ -1,0 +1,4 @@
+**
+!audio/
+!audio/*.py
+audio/test_*.py
