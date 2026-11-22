@@ -14,6 +14,25 @@ ARTIST = "208d1dea-a5c4-45b7-b51d-daf653bdff3e"
 
 
 class CatalogTests(unittest.TestCase):
+    def test_book_routes_only_admit_explicit_post_to_edition(self):
+        books = Mock()
+        key = "a" * 64
+        books.status.return_value = {"id": key, "status": "unknown"}
+        catalog = Mock()
+        jobs = Mock()
+        api = AudioAPI(jobs, catalog, "s" * 32, books)
+        url = "/api/books/requests/" + key
+        self.assertEqual(api.route("GET", url), (200, books.status.return_value))
+        books.submit.assert_not_called()
+        for bad in (url + "?retry=1", url + "0", "/api/music/requests/" + key):
+            self.assertEqual(api.route("POST", bad)[0], 404)
+        api.route("POST", url)
+        books.submit.assert_called_once_with(key)
+        api.route("GET", "/api/books/search?q=novel&offset=20")
+        books.search.assert_called_once_with("novel", 20)
+        catalog.search.assert_not_called()
+        jobs.submit.assert_not_called()
+
     def test_mirror_preserves_group_and_track_order(self):
         c = Catalog("https://musicbrainz.org")
         c.get = Mock(side_effect=urllib.error.HTTPError("", 503, "busy", {}, None))

@@ -161,19 +161,83 @@ def request(op, address, headers, data=None, maximum=4 * 1024**2):
     return content
 
 
-class MusicSources:
+class AudioSources:
+    category = CATEGORY
+    torrent_filename = "album.torrent"
+
     def __init__(self, prowlarr, indexer, qbit, save, prow_key_file, qbit_auth_file):
         self.prowlarr = origin(prowlarr)
         self.qbit = origin(qbit)
         self.indexer = int(indexer)
         self.save = save.rstrip("/")
         check(
-            0 < self.indexer < 2**31 and re.fullmatch(r"(?:/[a-zA-Z0-9_-]+)*/quarry-music", self.save),
+            0 < self.indexer < 2**31
+            and re.fullmatch(r"(?:/[a-zA-Z0-9_-]+)*/" + re.escape(self.category), self.save),
             "invalid_music_routing",
         )
         self.prow_key_file = prow_key_file
         self.qbit_auth_file = qbit_auth_file
 
+    @contextlib.contextmanager
+    def transfer_client(self):
+        op = client()
+        creds = json.loads(secret(self.qbit_auth_file))
+        headers = {"Referer": self.qbit + "/"}
+        if set(creds) == {"apiKey"}:
+            key = creds["apiKey"]
+            check(
+                isinstance(key, str) and key.isascii() and not any(ch.isspace() for ch in key),
+                "invalid_service_secret",
+            )
+            headers["Authorization"] = "Bearer " + key
+        else:
+            check(set(creds) == {"username", "password"}, "invalid_service_secret")
+            body = urllib.parse.urlencode(creds).encode()
+            response = request(op, self.qbit + "/api/v2/auth/login", headers, body, 1024)
+            cookies = [
+                cookie
+                for handler in op.handlers
+                if hasattr(handler, "cookiejar")
+                for cookie in handler.cookiejar
+            ]
+            if response.strip() not in (b"", b"Ok.") or not cookies:
+                raise ConnectionError("downloader_session_unavailable")
+        try:
+
+            def call(endpoint, data=None, extra=None):
+                return request(op, self.qbit + "/api/v2/" + endpoint, headers | (extra or {}), data)
+
+            cat = json.loads(call("torrents/categories")).get(self.category)
+            check(
+                isinstance(cat, dict) and (cat.get("savePath") or "").rstrip("/") == self.save,
+                "category_location_changed",
+            )
+            yield call
+        finally:
+            if "password" in creds:
+                with contextlib.suppress(OSError):
+                    request(op, self.qbit + "/api/v2/auth/logout", headers, b"", 1024)
+
+    def add(self, call, key, raw):
+        boundary = secrets.token_hex(24)
+        form = bytearray()
+        for name, val in dict(
+            category=self.category, savepath=self.save + "/" + key, autoTMM="false", contentLayout="Original"
+        ).items():
+            form.extend(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{val}\r\n'.encode()
+            )
+        form.extend(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="torrents"; filename="{self.torrent_filename}"\r\nContent-Type: application/x-bittorrent\r\n\r\n'.encode()
+        )
+        form.extend(raw)
+        form.extend(f"\r\n--{boundary}--\r\n".encode())
+        # qBittorrent versions differ on the add response body. A successful or lost
+        # acknowledgment is followed by observing the pre-recorded exact infohash and path.
+        call("torrents/add", bytes(form), {"Content-Type": "multipart/form-data; boundary=" + boundary})
+
+
+class MusicSources(AudioSources):
     def candidates(self, artist, album):
         query = urllib.parse.urlencode(
             dict(
@@ -213,66 +277,8 @@ class MusicSources:
                 if error.code not in (404, 410):
                     raise
 
-    @contextlib.contextmanager
-    def transfer_client(self):
-        op = client()
-        creds = json.loads(secret(self.qbit_auth_file))
-        headers = {"Referer": self.qbit + "/"}
-        if set(creds) == {"apiKey"}:
-            key = creds["apiKey"]
-            check(
-                isinstance(key, str) and key.isascii() and not any(ch.isspace() for ch in key),
-                "invalid_service_secret",
-            )
-            headers["Authorization"] = "Bearer " + key
-        else:
-            check(set(creds) == {"username", "password"}, "invalid_service_secret")
-            body = urllib.parse.urlencode(creds).encode()
-            response = request(op, self.qbit + "/api/v2/auth/login", headers, body, 1024)
-            cookies = [
-                cookie
-                for handler in op.handlers
-                if hasattr(handler, "cookiejar")
-                for cookie in handler.cookiejar
-            ]
-            if response.strip() not in (b"", b"Ok.") or not cookies:
-                raise ConnectionError("downloader_session_unavailable")
-        try:
 
-            def call(endpoint, data=None, extra=None):
-                return request(op, self.qbit + "/api/v2/" + endpoint, headers | (extra or {}), data)
-
-            cat = json.loads(call("torrents/categories")).get(CATEGORY)
-            check(
-                isinstance(cat, dict) and (cat.get("savePath") or "").rstrip("/") == self.save,
-                "category_location_changed",
-            )
-            yield call
-        finally:
-            if "password" in creds:
-                with contextlib.suppress(OSError):
-                    request(op, self.qbit + "/api/v2/auth/logout", headers, b"", 1024)
-
-    def add(self, call, key, raw):
-        boundary = secrets.token_hex(24)
-        form = bytearray()
-        for name, val in dict(
-            category=CATEGORY, savepath=self.save + "/" + key, autoTMM="false", contentLayout="Original"
-        ).items():
-            form.extend(
-                f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{val}\r\n'.encode()
-            )
-        form.extend(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="torrents"; filename="album.torrent"\r\nContent-Type: application/x-bittorrent\r\n\r\n'.encode()
-        )
-        form.extend(raw)
-        form.extend(f"\r\n--{boundary}--\r\n".encode())
-        # qBittorrent versions differ on the add response body. A successful or lost
-        # acknowledgment is followed by observing the pre-recorded exact infohash and path.
-        call("torrents/add", bytes(form), {"Content-Type": "multipart/form-data; boundary=" + boundary})
-
-
-def manifest(raw, reported_size):
+def manifest(raw, reported_size, *, audio_formats=AUDIO):
     """Read the original v1 info bytes, reject ambiguous names before submitting a transfer."""
     offset = 0
     info_hash = None
@@ -364,7 +370,7 @@ def manifest(raw, reported_size):
         path = "/".join([root, *map(component, parts)])
         size = row.get(b"length")
         check(
-            PurePosixPath(path).suffix.lower() in AUDIO | EXTRAS
+            PurePosixPath(path).suffix.lower() in audio_formats | EXTRAS
             and type(size) is int
             and size >= 0
             and path not in files,
@@ -392,6 +398,6 @@ def manifest(raw, reported_size):
         and len(hashes) == 20 * ((total + n - 1) // n),
         "invalid_piece_table",
     )
-    audio = [p for p in files if PurePosixPath(p).suffix.lower() in AUDIO]
+    audio = [p for p in files if PurePosixPath(p).suffix.lower() in audio_formats]
     check(0 < len(audio) <= 512 and all(files[p] > 0 for p in audio), "missing_audio")
     return info_hash, {"entries": list(files.items()), "piece": n, "hashes": hashes.hex()}

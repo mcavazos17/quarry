@@ -10,6 +10,14 @@ Quarry persists the request before looking up the edition. It checks the music c
 
 ## Run the private service
 
+### Audiobooks
+
+Listeners can search a configured Prowlarr audiobook indexer and select a particular edition from Cadence. Each selected result gets its own durable ID. Book downloads use a separate `quarry-audiobooks` qBittorrent category and a dedicated publication directory. Cadence indexes the original files and opens the book in its chapter player.
+
+Set all four book variables to enable these endpoints: `QUARRY_BOOK_INDEXER_ID`, `QUARRY_BOOK_SAVE_PATH`, `QUARRY_BOOK_DOWNLOADS`, and `QUARRY_BOOK_LIBRARY`. Provide the same directory access described for music, using separate download and library folders. Set up the book category with the exact save path configured here. The service shares the existing private state directory and Prowlarr/qBittorrent connections between its workers. Music-only installations can omit all four book variables.
+
+### Container
+
 Build from the repository root using `docker build -f audio/Dockerfile -t quarry-audio:local .`. Attach the container to a private network shared with Cadence. The service listens on port 8088 inside its container. Mount the following directories and files. The service user needs read access to the completed downloads, write access to state and the publication parent, and read access to the secret files.
 
 | Environment variable | Value |
@@ -37,5 +45,8 @@ All request endpoints require `X-Api-Key`. `GET /health` is available for a priv
 | `GET /api/music/search?q=...&offset=0` | Up to 20 release groups, with a next offset when more results are available |
 | `POST /api/music/requests/{release-group-id}` | Accept an album, or return the current status of an existing request. The body can be empty or `{}`. |
 | `GET /api/music/requests/{release-group-id}` | Current state. A completed import includes ordered root-relative paths, byte sizes and SHA-256 digests. |
+| `GET /api/books/search?q=...&offset=0` | Selectable audiobook editions and their sizes |
+| `POST /api/books/requests/{edition-id}` | Queue the selected edition or return its existing receipt |
+| `GET /api/books/requests/{edition-id}` | Current state and the ordered files of a completed import |
 
 Run `python -m unittest discover -s audio` with FFmpeg and ffprobe available. The tests use original fixtures and temporary directories.

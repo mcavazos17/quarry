@@ -95,8 +95,8 @@ def track_identity(path, artist, album, group):
     return ordinal("disc", "1"), ordinal("track", None), title
 
 
-def publish(key, spec, artist, album, tracks, downloads, library):
-    staging = library.parent / ".quarry-music-staging"
+def publish_verified(key, spec, downloads, library, formats, stage_name, order):
+    staging = library.parent / stage_name
     staging.mkdir(mode=0o750, exist_ok=True)
     check(
         staging.resolve(strict=True) == staging and staging.stat().st_dev == library.stat().st_dev,
@@ -111,11 +111,11 @@ def publish(key, spec, artist, album, tracks, downloads, library):
     with tempfile.TemporaryDirectory(prefix=key + "-", dir=staging) as work:
         work = Path(work)
         # Rename a child, leaving TemporaryDirectory responsible for the surrounding workspace.
-        ready = work / "album"
+        ready = work / "ready"
         ready.mkdir(mode=0o750)
         for name, size in spec["entries"]:
             extension = Path(name).suffix.lower()
-            is_audio = extension in AUDIO
+            is_audio = extension in formats
             target = work / (str(len(rows)) + extension) if is_audio else None
             sha = hashlib.sha256()
             with (
@@ -147,21 +147,13 @@ def publish(key, spec, artist, album, tracks, downloads, library):
                     dst.flush()
                     os.fsync(dst.fileno())
             if target:
-                disc, num, title = track_identity(target, artist, album, key)
-                rows.append((disc, num, title, target, sha.hexdigest(), size))
+                rows.append((name, target, sha.hexdigest(), size))
         if used:
             check(piece.digest() == expected[index : index + 20], "piece_hash_mismatch")
             index += 20
         check(index == len(expected), "incomplete_piece_table")
-        rows.sort(key=lambda r: (r[0], r[1]))
-        check(
-            len({(r[0], r[1]) for r in rows}) == len(rows)
-            and [r[2] for r in rows] == [normalized(t) for t in tracks],
-            "edition_tracklist_mismatch",
-        )
         files = []
-        for disc, num, _, target, digest, size in rows:
-            name = f"{disc:02d}-{num:03d}{target.suffix}"
+        for name, target, digest, size in order(rows):
             target.rename(ready / name)
             os.chmod(ready / name, 0o640)
             files.append({"path": key + "/" + name, "size": size, "sha256": digest})
@@ -195,3 +187,21 @@ def publish(key, spec, artist, album, tracks, downloads, library):
                 finally:
                     os.close(fd)
         return files
+
+
+def publish(key, spec, artist, album, tracks, downloads, library):
+    def order(media):
+        rows = []
+        for _, target, digest, size in media:
+            disc, num, title = track_identity(target, artist, album, key)
+            rows.append((disc, num, title, target, digest, size))
+        rows.sort(key=lambda r: (r[0], r[1]))
+        check(
+            len({(r[0], r[1]) for r in rows}) == len(rows)
+            and [r[2] for r in rows] == [normalized(t) for t in tracks],
+            "edition_tracklist_mismatch",
+        )
+        for disc, num, _, target, digest, size in rows:
+            yield f"{disc:02d}-{num:03d}{target.suffix}", target, digest, size
+
+    return publish_verified(key, spec, downloads, library, AUDIO, ".quarry-music-staging", order)
