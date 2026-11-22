@@ -302,6 +302,44 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(worker.status(GROUP)["reason"], "piece_hash_mismatch")
         self.assertFalse((self.library / GROUP).exists())
 
+    def test_downloader_add_accepts_v52_response_and_defers_to_hash_observation(self):
+        from unittest.mock import Mock
+
+        s = MusicSources(
+            "http://127.0.0.1:9696",
+            1,
+            "http://127.0.0.1:8080",
+            "/downloads/quarry-music",
+            self.root / "key",
+            self.root / "auth",
+        )
+        for reply in (
+            b"Ok.",
+            b"",
+            json.dumps(
+                {"success_count": 1, "failure_count": 0, "pending_count": 0, "added_torrent_ids": ["a" * 40]}
+            ).encode(),
+        ):
+            call = Mock(return_value=reply)
+            s.add(call, GROUP, b"synthetic torrent bytes")
+            self.assertEqual(call.call_count, 1)
+            self.assertEqual(call.call_args.args[0], "torrents/add")
+
+    def test_legacy_acknowledgment_review_observes_same_download_after_restart(self):
+        payload = self.original("one.flac", TITLES[0], 1)
+        worker = self.worker({"one.flac": payload})
+        worker.submit(GROUP, ARTIST, ALBUM, [TITLES[0]])
+        worker.once()
+        with worker.db() as db:
+            db.execute(
+                "UPDATE albums SET status='review',reason='download_not_acknowledged' WHERE id=?", (GROUP,)
+            )
+        restored = MusicWorker(self.state, self.downloads, self.library, self.source)
+        self.assertEqual(restored.status(GROUP)["status"], "downloading")
+        restored.once()
+        self.assertEqual(restored.status(GROUP)["status"], "complete")
+        self.assertEqual(self.source.calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

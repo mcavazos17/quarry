@@ -52,6 +52,12 @@ class MusicWorker:
               id TEXT PRIMARY KEY, artist TEXT NOT NULL, album TEXT NOT NULL, tracks TEXT NOT NULL,
               status TEXT NOT NULL, reason TEXT, hash TEXT UNIQUE, manifest TEXT, files TEXT,
               sent REAL, next REAL NOT NULL DEFAULT 0)""")
+            # Older workers treated an unfamiliar successful add response as terminal, even
+            # though the transfer had been registered. Resume observation of that same hash.
+            db.execute("""UPDATE albums SET status='downloading', reason=NULL, next=0
+                          WHERE status='review' AND reason='download_not_acknowledged'
+                          AND length(hash)=40 AND hash NOT GLOB '*[^0-9a-f]*'
+                          AND manifest IS NOT NULL AND sent IS NOT NULL AND files IS NULL""")
 
     @contextlib.contextmanager
     def db(self):

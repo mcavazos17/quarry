@@ -267,10 +267,9 @@ class MusicSources:
         )
         form.extend(raw)
         form.extend(f"\r\n--{boundary}--\r\n".encode())
-        reply = call(
-            "torrents/add", bytes(form), {"Content-Type": "multipart/form-data; boundary=" + boundary}
-        )
-        check(reply.strip() in (b"", b"Ok."), "download_not_acknowledged")
+        # qBittorrent versions differ on the add response body. A successful or lost
+        # acknowledgment is followed by observing the pre-recorded exact infohash and path.
+        call("torrents/add", bytes(form), {"Content-Type": "multipart/form-data; boundary=" + boundary})
 
 
 def manifest(raw, reported_size):
