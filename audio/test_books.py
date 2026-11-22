@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from books import BookWorker, BookSources
+from books import BookWorker, BookSources, FederatedBooks
 from test_worker import FakeTransfers
 
 
@@ -42,6 +42,19 @@ class BookFixture(FakeTransfers):
 
 
 class BooksTests(unittest.TestCase):
+    def test_federated_editions_keep_their_origin(self):
+        from unittest.mock import Mock
+        primary, dedicated = Mock(), Mock()
+        primary.search.return_value = {"items":[{"id":"primary"}], "nextOffset":None}
+        dedicated.search.return_value = {"items":[{"id":"dedicated"}], "nextOffset":None}
+        primary.submit.return_value = {"id":"dedicated", "status":"unknown"}
+        dedicated.submit.return_value = {"id":"dedicated", "status":"queued"}
+        books = FederatedBooks(primary,dedicated)
+        self.assertEqual([r["id"] for r in books.search("book",0)["items"]], ["primary","dedicated"])
+        self.assertEqual(books.submit("dedicated")["status"], "queued")
+        dedicated.search.side_effect = ConnectionError()
+        self.assertEqual(books.search("book",0)["items"], [{"id":"primary"}])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -124,6 +137,22 @@ class BooksTests(unittest.TestCase):
             ["ffprobe", "-v", "error", "-show_chapters", "-of", "json", "-i", str(m4b)]
         )
         self.assertEqual([c["tags"]["title"] for c in json.loads(probe)["chapters"]], ["First", "Second"])
+
+    def test_general_tracker_books_require_spoken_edition_evidence(self):
+        secret = self.root / "tracker.key"
+        secret.write_text("fixture")
+        sources = BookSources("http://127.0.0.1:9696", 2, "http://127.0.0.1:8080",
+                              BookFixture.save, secret, self.root / "unused", general_categories=True)
+        base = dict(indexerId=2, protocol="torrent", guid="test", title="The Reader [M4B]",
+                    size=20000, downloadUrl=sources.prowlarr+"/2/download?link=opaque",
+                    categories=[dict(id=7020)])
+        rows = [base, {**base,"title":"The Reader [EPUB]"}, {**base,"categories":[dict(id=7030)]},
+                {**base,"categories":[dict(id=3000)],"title":"A reading - unabridged"},
+                {**base,"downloadUrl":sources.prowlarr+"/1/download?link=other"}]
+        with patch("books.request", return_value=json.dumps(rows).encode()) as req:
+            result = sources.page("The Reader", 0)
+        self.assertIn("categories=3000&categories=7000", req.call_args.args[1])
+        self.assertEqual([item is not None for item in result], [True, False, False, True, False])
 
     def test_size_category_and_guid_bound_edition_token(self):
         secret = self.root / "prowlarr.key"

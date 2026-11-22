@@ -25,9 +25,10 @@ def checked_id(key):
 
 
 class MusicWorker:
-    def __init__(self, state, downloads, library, sources):
+    def __init__(self, state, downloads, library, sources, *, secondary=None):
         self.state, self.downloads, self.library = map(Path, (state, downloads, library))
         self.sources = sources
+        self.secondary = secondary
         for p in (self.state, self.downloads, self.library):
             check(p.is_absolute() and p.is_dir() and p.resolve(strict=True) == p, "invalid_mount")
         check(
@@ -107,18 +108,31 @@ class MusicWorker:
             result["reason"] = row["reason"]
         return result
 
-    def matched(self, entry, h, key):
+    def matched(self, entry, h, key, source=None):
         return (
             entry.get("hash", "").lower() == h
             and entry.get("category") == CATEGORY
-            and (entry.get("save_path") or "").rstrip("/") == self.sources.save + "/" + key
+            and (entry.get("save_path") or "").rstrip("/") == (source or self.sources).save + "/" + key
         )
 
     def acquire(self, row):
         key = row["id"]
         count = len(json.loads(row["tracks"]))
         rejected = None
-        for raw, size in self.sources.candidates(row["artist"], row["album"]):
+        routes = [(self.sources, False)]
+        if self.secondary:
+            routes.append((self.secondary[0], True))
+        def candidates():
+            for source, dedicated in routes:
+                if dedicated:
+                    self.secondary[2].snapshot()
+                try:
+                    for raw, size in source.candidates(row["artist"], row["album"]):
+                        yield source, dedicated, raw, size
+                except OSError:
+                    if dedicated or not self.secondary:
+                        raise
+        for source, dedicated, raw, size in candidates():
             try:
                 h, spec = manifest(raw, size)
                 check(
@@ -135,22 +149,26 @@ class MusicWorker:
                 raise rejected
             self.defer(key, 600)
             return
-        with self.sources.transfer_client() as call:
+        if dedicated:
+            spec["dedicated"] = True
+        with source.transfer_client() as call:
             existing = json.loads(call("torrents/info?hashes=" + h))
             check(
                 isinstance(existing, list)
-                and (not existing or len(existing) == 1 and self.matched(existing[0], h, key)),
+                and (not existing or len(existing) == 1 and self.matched(existing[0], h, key, source)),
                 "transfer_already_owned",
             )
             # Record exact identity and ownership before crossing the acquisition boundary. Only
             # this successful state transition may submit. Later attempts observe the registered hash.
+            if dedicated and not existing:
+                self.secondary[2].reserve(key, sum(length for _, length in spec["entries"]), call)
             with self.db() as db:
                 claimed = db.execute(
                     "UPDATE albums SET status='downloading', hash=?,manifest=?,sent=?,next=0 WHERE id=? AND status='searching'",
                     (h, json.dumps(spec), time.time(), key),
                 ).rowcount
             if claimed and not existing:
-                self.sources.add(call, key, raw)
+                source.add(call, key, raw)
 
     def defer(self, key, seconds):
         with self.db() as db:
@@ -161,13 +179,19 @@ class MusicWorker:
 
     def observe(self, row):
         key, h = row["id"], row["hash"]
-        with self.sources.transfer_client() as call:
+        spec = json.loads(row["manifest"])
+        source, downloads = self.sources, self.downloads
+        if spec.get("dedicated"):
+            if not self.secondary:
+                raise OSError("Dedicated source unavailable")
+            source, downloads, _ = self.secondary
+        with source.transfer_client() as call:
             entries = json.loads(call("torrents/info?hashes=" + h))
             if entries == []:
                 check(time.time() - row["sent"] < 1800, "transfer_unconfirmed")
                 return
             check(
-                isinstance(entries, list) and len(entries) == 1 and self.matched(entries[0], h, key),
+                isinstance(entries, list) and len(entries) == 1 and self.matched(entries[0], h, key, source),
                 "transfer_identity_changed",
             )
             transfer = entries[0]
@@ -179,7 +203,6 @@ class MusicWorker:
                 or transfer.get("amount_left") != 0
             ):
                 return
-            spec = json.loads(row["manifest"])
             actual = json.loads(call("torrents/files?hash=" + h))
             check(
                 isinstance(actual, list)
@@ -189,7 +212,7 @@ class MusicWorker:
                 "transfer_file_list_changed",
             )
         result = publish(
-            key, spec, row["artist"], row["album"], json.loads(row["tracks"]), self.downloads, self.library
+            key, spec, row["artist"], row["album"], json.loads(row["tracks"]), downloads, self.library
         )
         with self.db() as db:
             db.execute(

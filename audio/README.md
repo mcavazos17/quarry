@@ -28,6 +28,7 @@ Build from the repository root using `docker build -f audio/Dockerfile -t quarry
 | `QUARRY_MUSIC_SAVE_PATH` | Absolute category directory as seen by qBittorrent. Create a category named `quarry-music` with this save path. |
 | `PROWLARR_URL`, `QUARRY_MUSIC_INDEXER_ID` | Private Prowlarr origin and numeric music indexer ID |
 | `QUARRY_MUSIC_EXTRA_INDEXER_IDS` | Optional comma-separated Prowlarr IDs for additional album sources. Music searches include the primary and additional IDs. Audiobook searches use their separately configured indexer. |
+| `QUARRY_BOOK_GENERAL_CATEGORIES` | On a worker dedicated to a tracker without an audiobook category, set to `true` to search Audio and Books. Results outside the audiobook category must be explicitly labeled as spoken editions. Payloads still pass the audiobook file checks before download. |
 | `QBIT_URL` | Private qBittorrent Web UI origin |
 | `QUARRY_PROWLARR_KEY_FILE` | Mounted file containing the Prowlarr API key |
 | `QUARRY_QBIT_AUTH_FILE` | Mounted private JSON file containing `username` and `password`, or `apiKey` |
@@ -51,3 +52,23 @@ All request endpoints require `X-Api-Key`. `GET /health` is available for a priv
 | `GET /api/books/requests/{edition-id}` | Current state and the ordered files of a completed import |
 
 Run `python -m unittest discover -s audio` with FFmpeg and ffprobe available. The tests use original fixtures and temporary directories.
+
+### Dedicated TorrentLeech sources
+
+Set `QUARRY_TL_INDEXER_ID`, `QUARRY_TL_PROWLARR_URL`, `QUARRY_TL_PROWLARR_KEY_FILE`,
+`QUARRY_TL_QBIT_URL`, `QUARRY_TL_QBIT_AUTH_FILE`, `QUARRY_TL_DOWNLOADS` and
+`QUARRY_TL_ACCOUNT_FILE` together. Use an isolated Prowlarr endpoint so unrelated applications cannot grab
+TorrentLeech results through the shared client. Omit the TorrentLeech ID from the shared album indexer list.
+Mount the dedicated download tree read-only in the worker. On the dedicated client configure categories
+`quarry-music` at `/downloads/quarry-music` and `quarry-audiobooks` at `/downloads/quarry-audiobooks`.
+
+Albums try the primary tracker first. A transfer keeps its selected client across restarts.
+Audiobook searches combine editions from both sources. TorrentLeech results in the general music or book
+categories must identify a spoken edition, and its torrent must pass the file manifest check.
+
+The account file is a read-only input from the operator's trusted account verification process.
+Required fields are `tracker` (torrentleech), `observedAt` and `waitUntil` (Unix seconds),
+`uploadedBytes`, `downloadedBytes`, `availableSlots` and `downloadAllowed`. Missing or expired
+evidence leaves the request queued. A confirmation can admit one transfer. The shared reservation
+database accounts conservatively for recent debits across music and books. The worker checks the dedicated
+client's peer-discovery and seeding settings before dispatch. Keep seeding after import.

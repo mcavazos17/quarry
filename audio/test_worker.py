@@ -8,6 +8,7 @@ import unittest
 import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import Mock
 
 from worker import MusicWorker
 from worker_sources import CATEGORY, MusicSources, Review, manifest, release_matches
@@ -142,6 +143,25 @@ class WorkerTests(unittest.TestCase):
         for name, data in files.items():
             (self.spool / name).write_bytes(data)
         return MusicWorker(self.state, self.downloads, self.library, self.source)
+
+    def test_secondary_album_routes_to_its_own_client_after_restart(self):
+        files = {"one.flac": self.original("one.flac", TITLES[0], 1), "two.flac": self.original("two.flac", TITLES[1], 2)}
+        worker = self.worker(files)
+        dedicated = self.root / "dedicated"
+        dedicated.mkdir()
+        shutil.copytree(self.downloads / GROUP, dedicated / GROUP)
+        secondary = FakeTransfers(files)
+        guard = Mock()
+        worker.secondary = (secondary, dedicated, guard)
+        with patch.object(self.source, "candidates", return_value=[]):
+            worker.submit(GROUP, ARTIST, ALBUM, TITLES)
+            worker.once()
+        guard.reserve.assert_called_once()
+        self.assertEqual((self.source.calls, secondary.calls), (0,1))
+        again = MusicWorker(self.state, self.downloads, self.library, self.source, secondary=worker.secondary)
+        with patch.object(self.source, "transfer_client", side_effect=AssertionError("incorrect client")):
+            again.once()
+        self.assertEqual(again.status(GROUP)["status"], "complete")
 
     def test_album_release_boundaries(self):
         self.assertTrue(

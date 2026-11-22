@@ -106,6 +106,21 @@ def serve():
     from worker import MusicSources, MusicWorker
 
     env = os.environ
+    secondary = None
+    if "QUARRY_TL_INDEXER_ID" in env:
+        from tracker_admission import Admission
+        check_id = int(env["QUARRY_TL_INDEXER_ID"])
+        if env["QUARRY_TL_QBIT_URL"].rstrip("/") == env["QBIT_URL"].rstrip("/"):
+            raise ValueError("TorrentLeech requires a dedicated qBittorrent client")
+        if env["QUARRY_TL_PROWLARR_URL"].rstrip("/") == env["PROWLARR_URL"].rstrip("/"):
+            raise ValueError("TorrentLeech requires an isolated indexer endpoint")
+        admission = Admission(env["QUARRY_AUDIO_STATE"], env["QUARRY_TL_ACCOUNT_FILE"])
+        tl_connection = (env["QUARRY_TL_PROWLARR_URL"], check_id, env["QUARRY_TL_QBIT_URL"])
+        tl_keys = (Path(env["QUARRY_TL_PROWLARR_KEY_FILE"]), Path(env["QUARRY_TL_QBIT_AUTH_FILE"]))
+        tl_downloads = Path(env["QUARRY_TL_DOWNLOADS"])
+        if not tl_downloads.is_absolute() or tl_downloads.resolve(strict=True) != tl_downloads:
+            raise ValueError("Invalid TorrentLeech download mount")
+        secondary = (MusicSources(*tl_connection, "/downloads/quarry-music", *tl_keys), tl_downloads / "quarry-music", admission)
     sources = MusicSources(
         env["PROWLARR_URL"],
         int(env["QUARRY_MUSIC_INDEXER_ID"]),
@@ -120,6 +135,7 @@ def serve():
         Path(env["QUARRY_MUSIC_DOWNLOADS"]),
         Path(env["QUARRY_MUSIC_LIBRARY"]),
         sources,
+        secondary=secondary,
     )
     catalog = Catalog(env.get("QUARRY_MUSICBRAINZ_URL", "https://musicbrainz.org"))
     jobs = AlbumRequests(Path(env["QUARRY_AUDIO_STATE"]), worker, catalog)
@@ -138,8 +154,17 @@ def serve():
                 env["QUARRY_BOOK_SAVE_PATH"],
                 Path(env["QUARRY_PROWLARR_KEY_FILE"]),
                 Path(env["QUARRY_QBIT_AUTH_FILE"]),
+                general_categories=env.get("QUARRY_BOOK_GENERAL_CATEGORIES") == "true",
             ),
         )
+        if secondary:
+            from books import FederatedBooks
+            book_state = Path(env["QUARRY_AUDIO_STATE"]) / "torrentleech-books"
+            book_state.mkdir(mode=0o700, exist_ok=True)
+            secondary_books = BookWorker(book_state, tl_downloads / "quarry-audiobooks", Path(env["QUARRY_BOOK_LIBRARY"]),
+                BookSources(*tl_connection, "/downloads/quarry-audiobooks", *tl_keys, general_categories=True),
+                admission=admission)
+            books = FederatedBooks(books, secondary_books)
     api = AudioAPI(jobs, catalog, Path(env["QUARRY_AUDIO_KEY_FILE"]).read_text().strip(), books)
     address = env.get("QUARRY_AUDIO_BIND", "127.0.0.1"), int(env.get("QUARRY_AUDIO_PORT", "8088"))
     interval = max(1, min(3600, int(env.get("QUARRY_AUDIO_INTERVAL_SECONDS", "15"))))

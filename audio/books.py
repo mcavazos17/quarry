@@ -4,6 +4,7 @@ import collections
 import contextlib
 import datetime
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -33,16 +34,20 @@ class BookSources(AudioSources):
     category = "quarry-audiobooks"
     torrent_filename = "audiobook.torrent"
 
+    def __init__(self, *args, general_categories=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.general_categories = general_categories
+
     def page(self, query, page):
         params = urllib.parse.urlencode(
             dict(
                 query=query,
                 type="search",
-                categories=3030,
+                categories=(3000, 7000) if self.general_categories else (3030,),
                 indexerIds=self.indexer,
                 limit=20,
                 offset=page * 20,
-            )
+            ), doseq=True,
         )
         headers = {"X-Api-Key": secret(self.prow_key_file)}
         results = json.loads(request(client(), self.prowlarr + "/api/v1/search?" + params, headers))
@@ -57,7 +62,14 @@ class BookSources(AudioSources):
                 or row.get("protocol") != "torrent"
             ):
                 continue
-            if not any(isinstance(c, dict) and c.get("id") == 3030 for c in (row.get("categories") or [])):
+            categories = {c["id"] for c in (row.get("categories") or []) if isinstance(c, dict) and type(c.get("id")) is int}
+            if 3030 not in categories and not (
+                self.general_categories
+                and bool(categories & {3000, 7000, 7020})
+                and not categories.intersection({3020, 7030})
+                and isinstance(row.get("title"), str)
+                and re.search(r"\b(?:audio[ ._-]?books?|m4b|unabridged|abridged|narrated by)\b", row["title"], re.I)
+            ):
                 continue
             guid, title, size = row.get("guid"), row.get("title"), row.get("size")
             if (
@@ -81,9 +93,10 @@ class BookSources(AudioSources):
             tokens = urllib.parse.parse_qs(link.query, max_num_fields=12).get("link", [])
             if len(tokens) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{1,12000}", tokens[0]):
                 continue
-            identity = json.dumps(
-                [self.indexer, guid, title, size], ensure_ascii=False, separators=(",", ":")
-            ).encode()
+            fields = [self.indexer, guid, title, size]
+            if self.general_categories:
+                fields.insert(0, "dedicated-spoken-edition")
+            identity = json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode()
             item = {"id": hashlib.sha256(identity).hexdigest(), "title": title, "sizeBytes": size}
             seeds = row.get("seeders")
             if type(seeds) is int and 0 <= seeds <= 2147483647:
@@ -152,7 +165,7 @@ def book_order(rows):
 
 
 class BookWorker:
-    def __init__(self, state, downloads, library, sources):
+    def __init__(self, state, downloads, library, sources, *, admission=None):
         self.state, self.downloads, self.library = map(Path, (state, downloads, library))
         roots = [self.state, self.downloads, self.library]
         check(
@@ -164,6 +177,7 @@ class BookWorker:
             "overlapping_book_mounts",
         )
         self.sources = sources
+        self.admission = admission
         self.path = self.state / "audiobooks.sqlite"
         check(
             not any(
@@ -286,6 +300,8 @@ class BookWorker:
         with self.db() as db:
             edition = db.execute("SELECT size,token FROM editions WHERE id=?", (key,)).fetchone()
         check(edition is not None, "edition_missing")
+        if self.admission:
+            self.admission.snapshot()
         raw = self.sources.torrent(edition["token"])
         h, spec = manifest(raw, edition["size"], audio_formats=BOOK_AUDIO)
         with self.sources.transfer_client() as call:
@@ -295,6 +311,8 @@ class BookWorker:
                 and (not existing or len(existing) == 1 and self.matches(existing[0], h, key)),
                 "book_transfer_already_owned",
             )
+            if self.admission and not existing:
+                self.admission.reserve(key, sum(length for _, length in spec["entries"]), call)
             with self.db() as db:
                 claimed = db.execute(
                     "UPDATE transfers SET status='downloading',hash=?,spec=?,sent=?,next=0 WHERE id=? AND status='queued'",
@@ -382,3 +400,40 @@ class BookWorker:
                     )
         finally:
             self.work.release()
+
+
+class FederatedBooks:
+    def __init__(self, primary, dedicated):
+        self.workers = (primary, dedicated)
+
+    def search(self, query, offset):
+        check(type(offset) is int and 0 <= offset <= 180 and offset % 20 == 0, "invalid_book_search")
+        failures = []
+        def items(worker):
+            cursor = 0
+            while cursor is not None:
+                try:
+                    result = worker.search(query, cursor)
+                except OSError as error:
+                    failures.append(error)
+                    return
+                yield from result["items"]
+                cursor = result["nextOffset"]
+        mixed = (entry for pair in itertools.zip_longest(*(items(w) for w in self.workers))
+                 for entry in pair if entry is not None)
+        page = list(itertools.islice(mixed, offset, offset + 21))
+        if len(failures) == len(self.workers):
+            raise failures[0]
+        return {"items": page[:20], "nextOffset": offset + 20 if len(page) > 20 and offset < 180 else None}
+
+    def submit(self, key):
+        result = self.workers[0].submit(key)
+        return self.workers[1].submit(key) if result["status"] == "unknown" else result
+
+    def status(self, key):
+        result = self.workers[0].status(key)
+        return self.workers[1].status(key) if result["status"] == "unknown" else result
+
+    def once(self):
+        for worker in self.workers:
+            worker.once()
