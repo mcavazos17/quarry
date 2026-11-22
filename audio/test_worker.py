@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -230,6 +231,25 @@ class WorkerTests(unittest.TestCase):
         ) as req:
             self.assertEqual(list(s.candidates(ARTIST, ALBUM)), [(b"selected", 200)])
             self.assertEqual(req.call_args.args[1], base["downloadUrl"])
+
+    def test_album_search_combines_only_configured_indexers(self):
+        key = self.root / "key"
+        key.write_text("private-fixture-key")
+        sources = MusicSources(
+            "http://127.0.0.1:17170", 1, "http://127.0.0.1:17171",
+            "/downloads/quarry-music", key, self.root / "unused", additional_indexers=(2, 1),
+        )
+        def row(source, path_id, seeds):
+            return dict(indexerId=source, protocol="torrent", categories=[dict(id=3000)],
+                        title=ARTIST + " - " + ALBUM, size=200, seeders=seeds,
+                        downloadUrl=f"{sources.prowlarr}/{path_id}/download?link=fixture")
+
+        rows = [row(1, 1, 3), row(2, 2, 5), row(3, 3, 10), row(2, 1, 12)]
+        with patch("worker_sources.request", side_effect=[json.dumps(rows).encode(), b"second", b"first"]) as req:
+            self.assertEqual(list(sources.candidates(ARTIST, ALBUM)), [(b"second", 200), (b"first", 200)])
+            urls = [call.args[1] for call in req.call_args_list]
+            self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(urls[0]).query)["indexerIds"], ["1", "2"])
+            self.assertEqual(urls[1:], [rows[1]["downloadUrl"], rows[0]["downloadUrl"]])
 
     def test_missing_tracklist_never_dispatches(self):
         worker = self.worker({"one.flac": b"fixture"})

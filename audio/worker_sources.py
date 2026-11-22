@@ -238,18 +238,23 @@ class AudioSources:
 
 
 class MusicSources(AudioSources):
+    def __init__(self, prowlarr, indexer, qbit, save, prow_key_file, qbit_auth_file, *, additional_indexers=()):
+        super().__init__(prowlarr, indexer, qbit, save, prow_key_file, qbit_auth_file)
+        self.indexers = tuple(dict.fromkeys((self.indexer, *additional_indexers)))
+        check(all(type(i) is int and 0 < i < 2**31 for i in self.indexers), "invalid_music_indexer")
+
     def candidates(self, artist, album):
         query = urllib.parse.urlencode(
-            dict(
-                query=f"{artist} {album}", type="search", categories=3000, indexerIds=self.indexer, limit=100
-            )
+            dict(query=f"{artist} {album}", type="search", categories=3000, indexerIds=self.indexers, limit=100),
+            doseq=True,
         )
         headers = {"X-Api-Key": secret(self.prow_key_file)}
         rows = json.loads(request(client(), self.prowlarr + "/api/v1/search?" + query, headers))
         check(isinstance(rows, list) and len(rows) <= 2000, "invalid_index_results")
         candidates = []
         for row in rows:
-            if row.get("protocol") != "torrent" or row.get("indexerId") != self.indexer:
+            source = row.get("indexerId")
+            if row.get("protocol") != "torrent" or type(source) is not int or source not in self.indexers:
                 continue
             categories = [c.get("id") for c in row.get("categories", []) if isinstance(c, dict)]
             if 3030 in categories or not any(type(c) is int and 3000 <= c < 4000 for c in categories):
@@ -263,7 +268,7 @@ class MusicSources(AudioSources):
             link = urllib.parse.urlsplit(row.get("downloadUrl") or "")
             if (
                 link.scheme + "://" + link.netloc != self.prowlarr
-                or link.path != "/" + str(self.indexer) + "/download"
+                or link.path != f"/{source}/download"
                 or link.fragment
             ):
                 continue

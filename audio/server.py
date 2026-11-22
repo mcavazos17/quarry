@@ -113,6 +113,7 @@ def serve():
         env["QUARRY_MUSIC_SAVE_PATH"],
         Path(env["QUARRY_PROWLARR_KEY_FILE"]),
         Path(env["QUARRY_QBIT_AUTH_FILE"]),
+        additional_indexers=tuple(int(i) for i in env.get("QUARRY_MUSIC_EXTRA_INDEXER_IDS", "").split(",") if i.strip()),
     )
     worker = MusicWorker(
         Path(env["QUARRY_AUDIO_STATE"]),

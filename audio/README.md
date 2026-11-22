@@ -27,6 +27,7 @@ Build from the repository root using `docker build -f audio/Dockerfile -t quarry
 | `QUARRY_MUSIC_LIBRARY` | Dedicated music library directory under a writable publication parent. Mount only this directory read-only into Cadence. |
 | `QUARRY_MUSIC_SAVE_PATH` | Absolute category directory as seen by qBittorrent. Create a category named `quarry-music` with this save path. |
 | `PROWLARR_URL`, `QUARRY_MUSIC_INDEXER_ID` | Private Prowlarr origin and numeric music indexer ID |
+| `QUARRY_MUSIC_EXTRA_INDEXER_IDS` | Optional comma-separated Prowlarr IDs for additional album sources. Music searches include the primary and additional IDs. Audiobook searches use their separately configured indexer. |
 | `QBIT_URL` | Private qBittorrent Web UI origin |
 | `QUARRY_PROWLARR_KEY_FILE` | Mounted file containing the Prowlarr API key |
 | `QUARRY_QBIT_AUTH_FILE` | Mounted private JSON file containing `username` and `password`, or `apiKey` |
